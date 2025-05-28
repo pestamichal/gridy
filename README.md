@@ -44,4 +44,12 @@ lub ``` docker exec -it hbase-master hbase thrift start ``` żeby zobaczyć logi
 * HBase Master UI: http://localhost:16010
 * Job History Server: http://localhost:8188
 
-# Przykładowy skrypt test.py
+# Przykładowy skrypt (weryfikacja połączenia + listowanie tabel)
+
+```python test.py```
+
+# Dodawanie danych
+
+```python insert.py```
+
+_upload danych moze sie wykonywac nawet 3 min_
