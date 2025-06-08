@@ -7,12 +7,12 @@ tables_to_process = [
     {
         'csv_file': 'the-reddit-climate-change-dataset-comments.csv',
         'table_name': 'reddit_climate_change_comments',
-        'row_key': 'Post ID'
+        'row_key': 'id'
     },
     {
         'csv_file': 'the-reddit-climate-change-dataset-posts.csv',
         'table_name': 'reddit_climate_change_posts',
-        'row_key': 'Post ID'
+        'row_key': 'id'
     }
 ]
 
@@ -31,7 +31,7 @@ for config in tables_to_process:
         for row in reader:
             row_key = row[row_key_field]
             data = {f'cf:{k}': v for k, v in row.items() if k != row_key_field}
-            table.put(row_key, {k.encode(): v.encode() for k, v in data.items()})
+            table.put(row_key.encode(), {k.encode(): v.encode() for k, v in data.items()})
 
     count = sum(1 for _ in table.scan())
     print(f"✅ {csv_file} inserted into '{table_name}' — total rows: {count}")
