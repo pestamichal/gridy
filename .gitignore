@@ -6,3 +6,5 @@
 *.db
 
 hbase_vs_sqlite_experiment/__pycache__/
+
+*.png

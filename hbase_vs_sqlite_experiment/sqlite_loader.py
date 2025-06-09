@@ -1,6 +1,6 @@
 """
-Prosty loader danych do SQLite dla social media data
-Podstawowa implementacja do porównania wydajności z HBase
+Simple SQLite data loader for social media data
+Basic implementation to compare performance with HBase
 """
 
 import sqlite3
@@ -10,14 +10,14 @@ import logging
 import json
 import os
 
-# Konfiguracja logowania
+# Logging configuration
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class BasicSQLiteLoader:
     """
-    Podstawowa klasa do ładowania danych social media do SQLite
-    Bez optymalizacji - dla czystego porównania z HBase
+    Basic class for loading social media data into SQLite
+    No optimizations - for direct comparison with HBase
     """
     
     def __init__(self, db_path='social_media_basic.db', recreate=False):
@@ -34,42 +34,42 @@ class BasicSQLiteLoader:
         }
         
     def create_connection(self):
-        """Podstawowe połączenie SQLite"""
+        """Basic SQLite connection"""
         start_time = time.time()
         
         try:
-            # Usunięcie istniejącej bazy jeśli istnieje
+            # Remove existing database if present
             if self.recreate and os.path.exists(self.db_path):
                 os.remove(self.db_path)
-                logger.info(f"🗑️ Usunięto istniejącą bazę: {self.db_path}")
+                logger.info(f"🗑️ Removed existing database: {self.db_path}")
 
-            # Podstawowe połączenie
+            # Basic connection
             self.connection = sqlite3.connect(self.db_path)
             
-            # Test połączenia
+            # Test connection
             cursor = self.connection.cursor()
             cursor.execute("SELECT sqlite_version()")
             version = cursor.fetchone()[0]
-            logger.info(f"✅ Połączono z SQLite wersja: {version}")
+            logger.info(f"✅ Connected to SQLite version: {version}")
             
             self.performance_metrics['connection_time'] = time.time() - start_time
             return True
             
         except Exception as e:
-            logger.error(f"❌ Błąd połączenia z SQLite: {e}")
+            logger.error(f"❌ SQLite connection error: {e}")
             return False
     
     def create_basic_table(self, table_name='social_media'):
-        """Utworzenie podstawowej tabeli SQLite"""
+        """Create a basic SQLite table"""
         start_time = time.time()
         
         try:
             cursor = self.connection.cursor()
             
-            # Usunięcie tabeli jeśli istnieje
+            # Drop table if exists
             cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
             
-            # Podstawowa tabela - dokładnie jak w CSV
+            # Basic table - mirrors CSV structure
             create_table_sql = f"""
             CREATE TABLE {table_name} (
                 id INTEGER PRIMARY KEY,
@@ -96,23 +96,23 @@ class BasicSQLiteLoader:
             
             cursor.execute(create_table_sql)
             self.connection.commit()
-            logger.info(f"📊 Utworzono podstawową tabelę: {table_name}")
+            logger.info(f"📊 Created basic table: {table_name}")
             
             self.performance_metrics['table_creation_time'] = time.time() - start_time
             return True
             
         except Exception as e:
-            logger.error(f"❌ Błąd tworzenia tabeli: {e}")
+            logger.error(f"❌ Error creating table: {e}")
             return False
     
     def clean_value(self, value):
-        """Podstawowe oczyszczenie wartości"""
+        """Basic value cleaning"""
         if not value or str(value).strip() in ['', 'nan', 'None']:
             return None
         return str(value).strip()
     
     def convert_to_number(self, value):
-        """Podstawowa konwersja na liczbę"""
+        """Basic conversion to number"""
         if not value or str(value).strip() in ['', 'nan', 'None']:
             return None
         try:
@@ -124,7 +124,7 @@ class BasicSQLiteLoader:
             return None
     
     def prepare_data(self, row):
-        """Przygotowanie danych z CSV"""
+        """Prepare data from CSV"""
         return {
             'platform': self.clean_value(row.get('Platform')),
             'post_id': self.clean_value(row.get('Post ID')),
@@ -147,8 +147,8 @@ class BasicSQLiteLoader:
         }
     
     def load_data_basic(self, csv_file_path, table_name='social_media'):
-        """Podstawowe ładowanie danych do SQLite"""
-        logger.info("🚀 Rozpoczęcie podstawowego ładowania do SQLite...")
+        """Basic data loading into SQLite"""
+        logger.info("🚀 Starting basic SQLite data load...")
         start_time = time.time()
         
         total_records = 0
@@ -157,7 +157,7 @@ class BasicSQLiteLoader:
         try:
             cursor = self.connection.cursor()
             
-            # SQL do wstawiania danych
+            # Insert SQL
             insert_sql = f"""
             INSERT INTO {table_name} (
                 platform, post_id, post_type, post_content, post_timestamp,
@@ -170,16 +170,16 @@ class BasicSQLiteLoader:
             with open(csv_file_path, 'r', encoding='utf-8') as csvfile:
                 reader = csv.DictReader(csvfile)
                 
-                logger.info(f"📋 Kolumny CSV: {reader.fieldnames}")
+                logger.info(f"📋 CSV Columns: {reader.fieldnames}")
                 
                 for row in reader:
                     total_records += 1
                     
-                    # Przygotowanie danych
+                    # Prepare data
                     data = self.prepare_data(row)
                     
                     try:
-                        # Wstawienie pojedynczego rekordu
+                        # Insert single record
                         cursor.execute(insert_sql, (
                             data['platform'],
                             data['post_id'],
@@ -203,23 +203,23 @@ class BasicSQLiteLoader:
                         
                         successful_records += 1
                         
-                        # Commit co 1000 rekordów
+                        # Commit every 1000 records
                         if successful_records % 1000 == 0:
                             self.connection.commit()
-                            logger.info(f"📦 Zapisano {successful_records:,} rekordów")
+                            logger.info(f"📦 Saved {successful_records:,} records")
                         
                     except Exception as e:
-                        logger.warning(f"⚠️ Błąd wstawiania rekordu {total_records}: {e}")
+                        logger.warning(f"⚠️ Record insertion error {total_records}: {e}")
                         continue
                 
-                # Ostatni commit
+                # Final commit
                 self.connection.commit()
         
         except Exception as e:
-            logger.error(f"❌ Błąd podczas ładowania: {e}")
+            logger.error(f"❌ Error during data load: {e}")
             return False
         
-        # Obliczenie metryk
+        # Calculate metrics
         total_time = time.time() - start_time
         self.performance_metrics.update({
             'load_time': total_time,
@@ -229,40 +229,40 @@ class BasicSQLiteLoader:
             'success_rate': (successful_records / total_records * 100) if total_records > 0 else 0
         })
         
-        # Raport
+        # Report
         logger.info("="*60)
-        logger.info("📊 RAPORT ŁADOWANIA SQLITE")
+        logger.info("📊 SQLITE LOADING REPORT")
         logger.info("="*60)
-        logger.info(f"📝 Przetworzonych rekordów: {total_records:,}")
-        logger.info(f"✅ Załadowanych rekordów: {successful_records:,}")
-        logger.info(f"📈 Skuteczność: {self.performance_metrics['success_rate']:.1f}%")
-        logger.info(f"⏱️ Całkowity czas: {total_time:.2f}s")
-        logger.info(f"🚀 Wydajność: {self.performance_metrics['records_per_second']:,.1f} rek/s")
+        logger.info(f"📝 Records processed: {total_records:,}")
+        logger.info(f"✅ Records loaded: {successful_records:,}")
+        logger.info(f"📈 Success rate: {self.performance_metrics['success_rate']:.1f}%")
+        logger.info(f"⏱️ Total time: {total_time:.2f}s")
+        logger.info(f"🚀 Performance: {self.performance_metrics['records_per_second']:,.1f} rec/s")
         logger.info("="*60)
         
         return successful_records > 0
     
     def verify_data(self, table_name='social_media', sample_size=5):
-        """Weryfikacja załadowanych danych"""
-        logger.info("🔍 Weryfikacja danych...")
+        """Verification of loaded data"""
+        logger.info("🔍 Verifying data...")
         
         try:
             cursor = self.connection.cursor()
             
-            # Sprawdzenie struktury tabeli
+            # Check table structure
             cursor.execute(f"PRAGMA table_info({table_name})")
             columns = cursor.fetchall()
-            logger.info(f"📋 Struktura tabeli ({len(columns)} kolumn):")
+            logger.info(f"📋 Table structure ({len(columns)} columns):")
             for col in columns:
                 logger.info(f"   {col[1]} ({col[2]})")
             
-            # Próbka danych
+            # Sample data
             cursor.execute(f"SELECT * FROM {table_name} LIMIT {sample_size}")
             sample_rows = cursor.fetchall()
             
-            logger.info(f"\n📝 Próbka {len(sample_rows)} rekordów:")
+            logger.info(f"\n📝 Sample of {len(sample_rows)} records:")
             for i, row in enumerate(sample_rows, 1):
-                logger.info(f"   Rekord {i}:")
+                logger.info(f"   Record {i}:")
                 logger.info(f"      Platform: {row[1]}")
                 logger.info(f"      Post ID: {row[2]}")
                 logger.info(f"      Post Type: {row[3]}")
@@ -270,12 +270,12 @@ class BasicSQLiteLoader:
                 logger.info(f"      Comments: {row[7]}")
                 logger.info(f"      Sentiment: {row[18]}")
             
-            # Liczba rekordów
+            # Record count
             cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
             total_count = cursor.fetchone()[0]
-            logger.info(f"\n📊 Łączna liczba rekordów: {total_count:,}")
+            logger.info(f"\n📊 Total number of records: {total_count:,}")
             
-            # Podstawowe statystyki
+            # Basic stats
             cursor.execute(f"""
                 SELECT 
                     platform,
@@ -289,28 +289,28 @@ class BasicSQLiteLoader:
             """)
             platform_stats = cursor.fetchall()
             
-            logger.info(f"\n📈 Statystyki platform:")
+            logger.info(f"\n📈 Platform statistics:")
             for platform, count, avg_likes in platform_stats:
-                logger.info(f"   {platform}: {count:,} postów, średnio {avg_likes:.1f} like'ów")
+                logger.info(f"   {platform}: {count:,} posts, average {avg_likes:.1f} likes")
             
             return True
             
         except Exception as e:
-            logger.error(f"❌ Błąd weryfikacji: {e}")
+            logger.error(f"❌ Verification error: {e}")
             return False
     
     def cleanup(self):
-        """Zamknięcie połączenia"""
+        """Close connection"""
         if self.connection:
             self.connection.close()
-            logger.info("🔒 Zamknięto połączenie z SQLite")
+            logger.info("🔒 SQLite connection closed")
     
     def get_performance_report(self):
-        """Zwrócenie raportu wydajności"""
+        """Return performance report"""
         return self.performance_metrics
 
-def main():
-    """Przykład użycia podstawowego SQLite loadera"""
+def run_sqlite_loading():
+    """Example usage of basic SQLite loader"""
     
     csv_file_path = '../social_media_engagement_data.csv'
     table_name = 'social_media'
@@ -318,32 +318,32 @@ def main():
     loader = BasicSQLiteLoader(recreate=False)
     
     try:
-        # Połączenie
+        # Connection
         if not loader.create_connection():
             return
         
-        # Utworzenie tabeli
+        # Table creation
         if not loader.create_basic_table(table_name):
             return
         
-        # Ładowanie danych
+        # Data loading
         if loader.load_data_basic(csv_file_path, table_name):
-            # Weryfikacja
+            # Verification
             loader.verify_data(table_name)
             
-            # Raport
+            # Report
             report = loader.get_performance_report()
             with open('sqlite_basic_report.json', 'w') as f:
                 json.dump(report, f, indent=2)
             
-            logger.info("✅ Podstawowe ładowanie SQLite zakończone pomyślnie!")
+            logger.info("✅ Basic SQLite loading completed successfully!")
         else:
-            logger.error("❌ Ładowanie nie powiodło się")
+            logger.error("❌ Data loading failed")
             
     except Exception as e:
-        logger.error(f"❌ Błąd: {e}")
+        logger.error(f"❌ Error: {e}")
     finally:
         loader.cleanup()
 
 if __name__ == "__main__":
-    main()
+    run_sqlite_loading()

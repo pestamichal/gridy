@@ -172,7 +172,7 @@ def benchmark_hbase():
     loader.cleanup()
     return results
 
-def main():
+def run_benchmarks():
     results = {
         "sqlite": benchmark_sqlite(),
         "hbase": benchmark_hbase()
@@ -182,4 +182,4 @@ def main():
     print(f"✅ Benchmark complete. Results saved to '{RESULTS_FILE}'")
 
 if __name__ == "__main__":
-    main()
+    run_benchmarks()
