@@ -1,18 +1,8 @@
 import json
 import matplotlib.pyplot as plt
 
-# Load data
-with open('benchmark_results.json') as f:
-    benchmark = json.load(f)
-
-with open('hbase_stable_report.json') as f:
-    hbase_load = json.load(f)
-
-with open('sqlite_basic_report.json') as f:
-    sqlite_load = json.load(f)
-
 # --- Load Time Plot ---
-def plot_load_times():
+def plot_load_times(hbase_load, sqlite_load):
     labels = ['HBase', 'SQLite']
     load_times = [hbase_load['load_time'], sqlite_load['load_time']]
     rps = [hbase_load['records_per_second'], sqlite_load['records_per_second']]
@@ -35,7 +25,7 @@ def plot_load_times():
     plt.show()
 
 # --- Benchmark Performance Plot ---
-def plot_benchmark_times():
+def plot_benchmark_times(benchmark):
     categories = list(benchmark['sqlite'].keys())
     sqlite_times = [benchmark['sqlite'][k] for k in categories]
     hbase_times = [benchmark['hbase'][k] for k in categories]
@@ -59,9 +49,18 @@ def plot_benchmark_times():
 # Run plots
 
 def run_visualizations():
+     # Load data
+    with open('benchmark_results.json') as f:
+        benchmark = json.load(f)
+
+    with open('hbase_stable_report.json') as f:
+        hbase_load = json.load(f)
+
+    with open('sqlite_basic_report.json') as f:
+        sqlite_load = json.load(f)
     print("Generating visualizations...")
-    plot_load_times()
-    plot_benchmark_times()
+    plot_load_times(hbase_load, sqlite_load)
+    plot_benchmark_times(benchmark)
     print("Visualizations generated successfully.")
 
 if __name__ == "__main__":
