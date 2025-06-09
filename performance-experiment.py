@@ -1,689 +1,450 @@
 """
-Eksperyment analizy wydajności HBase vs SQLite
-Wykorzystuje istniejący kod do wczytywania danych z CSV
+Zoptymalizowany loader danych do HBase dla social media data
+Skupia się na maksymalnej wydajności HBase
 """
 
 import happybase
 import csv
-import sqlite3
 import time
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-import json
-from datetime import datetime
 import logging
+import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+import json
 
 # Konfiguracja logowania
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class SocialMediaPerformanceAnalyzer:
+class OptimizedHBaseLoader:
     """
-    Klasa do analizy wydajności HBase vs SQLite przy przetwarzaniu danych social media
+    Zoptymalizowana klasa do ładowania danych social media do HBase
+    z fokusem na wydajność i skalowanie
     """
     
-    def __init__(self, hbase_host='localhost', hbase_port=9090):
-        """Inicjalizacja połączeń i struktur danych"""
+    def __init__(self, hbase_host='172.104.141.218', hbase_port=9090):
         self.hbase_host = hbase_host
         self.hbase_port = hbase_port
-        self.hbase_connection = None
-        self.sqlite_connection = None
-        
-        # Struktura do zbierania metryk wydajności
+        self.connection_pool = []
         self.performance_metrics = {
-            'hbase': {
-                'write_times': [],      # Czasy zapisu danych
-                'read_times': [],       # Czasy odczytu pojedynczych rekordów
-                'query_times': [],      # Czasy wykonania zapytań filtrujących
-                'scan_times': [],       # Czasy skanowania całej tabeli
-                'aggregation_times': [] # Czasy operacji agregacyjnych
-            },
-            'sqlite': {
-                'write_times': [],
-                'read_times': [],
-                'query_times': [],
-                'scan_times': [],
-                'aggregation_times': []
-            }
-        }
-        
-        # Dodatkowe metryki
-        self.data_stats = {
+            'load_time': 0,
+            'records_per_second': 0,
             'total_records': 0,
-            'csv_file_size': 0,
-            'unique_platforms': set(),
-            'date_range': {'start': None, 'end': None}
+            'batch_times': [],
+            'connection_time': 0
         }
-    
-    def connect_hbase(self):
-        """Nawiązanie połączenia z HBase"""
-        try:
-            self.hbase_connection = happybase.Connection(
-                host=self.hbase_host, 
-                port=self.hbase_port
-            )
-            self.hbase_connection.open()
-            logger.info("✅ Połączono z HBase")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Błąd połączenia z HBase: {e}")
-            return False
-    
-    def connect_sqlite(self, db_path=':memory:'):
-        """Nawiązanie połączenia z SQLite"""
-        try:
-            self.sqlite_connection = sqlite3.connect(db_path)
-            logger.info("✅ Połączono z SQLite")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Błąd połączenia z SQLite: {e}")
-            return False
-    
-    def setup_hbase_table(self, table_name='social_media'):
-        """Utworzenie tabeli HBase (bazując na Twoim kodzie)"""
+        
+        # Optymalizowane ustawienia
+        self.batch_size = 5000  # Większe batche dla lepszej wydajności
+        self.thread_pool_size = 8  # Wielowątkowość
+        self.auto_flush = False  # Wyłączenie auto-flush dla batchy
+        
+    def create_connection_pool(self, pool_size=4):
+        """Tworzenie puli połączeń dla wielowątkowości"""
         start_time = time.time()
         
         try:
-            families = {'cf': dict()}  # Jedna rodzina kolumn jak w Twoim kodzie
+            for i in range(pool_size):
+                conn = happybase.Connection(
+                    host=self.hbase_host,
+                    port=self.hbase_port,
+                    autoconnect=False,
+                    compat='0.98',  # Kompatybilność dla lepszej wydajności
+                    transport='buffered',  # Buforowane połączenia
+                )
+                conn.open()
+                self.connection_pool.append(conn)
+                logger.info(f"✅ Utworzono połączenie {i+1}/{pool_size}")
             
-            if table_name.encode() not in self.hbase_connection.tables():
-                self.hbase_connection.create_table(table_name, families)
-                logger.info(f"📊 Utworzono tabelę HBase: {table_name}")
-            else:
-                logger.info(f"📊 Tabela HBase '{table_name}' już istnieje")
-            
-            self.hbase_table = self.hbase_connection.table(table_name)
-            
-            setup_time = time.time() - start_time
-            logger.info(f"⏱️ Czas konfiguracji HBase: {setup_time:.3f}s")
+            self.performance_metrics['connection_time'] = time.time() - start_time
+            logger.info(f"🔗 Pula {pool_size} połączeń utworzona w {self.performance_metrics['connection_time']:.2f}s")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Błąd tworzenia tabeli HBase: {e}")
+            logger.error(f"❌ Błąd tworzenia puli połączeń: {e}")
             return False
     
-    def analyze_csv_structure(self, csv_file_path):
-        """Analiza struktury pliku CSV i sprawdzenie duplikatów"""
+    def setup_optimized_table(self, table_name='social_media_optimized'):
+        """
+        Utworzenie zoptymalizowanej struktury tabeli HBase
+        Z wieloma rodzinami kolumn dla lepszej wydajności
+        """
         try:
-            with open(csv_file_path, newline='', encoding='utf-8') as csvfile:
-                reader = csv.DictReader(csvfile)
-                first_row = next(reader)
-                columns = list(first_row.keys())
-                
-                logger.info(f"📋 Znalezione kolumny w CSV: {columns}")
-                
-                # Przykładowe dane z pierwszego wiersza
-                logger.info("📝 Przykładowe dane:")
-                for col, val in first_row.items():
-                    logger.info(f"   {col}: {val}")
-                
-                # Sprawdzenie duplikatów w kolumnie Post ID
-                csvfile.seek(0)  # Reset do początku pliku
-                reader = csv.DictReader(csvfile)
-                post_ids = []
-                row_count = 0
-                
-                for row in reader:
-                    post_ids.append(row.get('Post ID', ''))
-                    row_count += 1
-                    if row_count > 10000:  # Analiza tylko pierwszych 10k dla wydajności
-                        break
-                
-                unique_post_ids = len(set(post_ids))
-                total_post_ids = len(post_ids)
-                duplicates = total_post_ids - unique_post_ids
-                
-                logger.info(f"📊 Analiza Post ID: {total_post_ids} rekordów, {unique_post_ids} unikalnych, {duplicates} duplikatów")
-                
-                if duplicates > 0:
-                    logger.warning(f"⚠️ Wykryto {duplicates} duplikatów w Post ID - będą automatycznie obsłużone")
-                
-                return columns, first_row
-        except Exception as e:
-            logger.error(f"❌ Błąd analizy CSV: {e}")
-            return [], {}
-
-    def setup_sqlite_table(self, csv_file_path):
-        """Utworzenie tabeli SQLite z automatycznym dostosowaniem do struktury CSV"""
-        start_time = time.time()
-        
-        try:
-            # Analiza struktury CSV
-            columns, sample_row = self.analyze_csv_structure(csv_file_path)
+            # Używamy pierwszego połączenia do operacji administracyjnych
+            admin_conn = self.connection_pool[0]
             
-            if not columns:
-                logger.error("❌ Nie można przeanalizować struktury CSV")
-                return False
-            
-            cursor = self.sqlite_connection.cursor()
+            # Definicja rodzin kolumn zoptymalizowana pod dane social media
+            families = {
+                # Podstawowe informacje o poście
+                'post': {
+                    'max_versions': 1,
+                    'compression': 'SNAPPY',  # Kompresja dla oszczędności miejsca
+                    'bloom_filter_type': 'ROW',  # Bloom filter dla szybszego wyszukiwania
+                    'block_cache_enabled': True,
+                    'time_to_live': 31536000  # 1 rok TTL
+                },
+                # Metryki zaangażowania
+                'metrics': {
+                    'max_versions': 1,
+                    'compression': 'SNAPPY',
+                    'bloom_filter_type': 'ROW',
+                    'block_cache_enabled': True,
+                    'in_memory': True  # Często używane dane w pamięci
+                },
+                # Informacje o audience
+                'audience': {
+                    'max_versions': 1,
+                    'compression': 'SNAPPY',
+                    'bloom_filter_type': 'ROW'
+                },
+                # Kampanie i influencerzy
+                'campaign': {
+                    'max_versions': 1,
+                    'compression': 'SNAPPY',
+                    'bloom_filter_type': 'ROW'
+                }
+            }
             
             # Usunięcie tabeli jeśli istnieje
-            cursor.execute("DROP TABLE IF EXISTS social_media")
+            if table_name.encode() in admin_conn.tables():
+                logger.info(f"🗑️ Usuwanie istniejącej tabeli {table_name}")
+                admin_conn.delete_table(table_name, disable=True)
             
-            # Automatyczne tworzenie struktury tabeli na podstawie CSV
-            column_definitions = []
-            primary_key_set = False
+            # Utworzenie nowej tabeli
+            admin_conn.create_table(table_name, families)
             
-            for col in columns:
-                # Oczyszczenie nazwy kolumny (zamiana spacji na podkreślenia, małe litery)
-                clean_col = col.lower().replace(' ', '_').replace('-', '_').replace('(', '').replace(')', '')
-                
-                # Określenie typu danych na podstawie przykładowej wartości
-                sample_value = sample_row.get(col, '')
-                
-                # Tylko pierwszy klucz z ID będzie PRIMARY KEY
-                if (col.upper() == 'POST ID' or 'post' in col.lower() and 'id' in col.lower()) and not primary_key_set:
-                    column_definitions.append(f"{clean_col} TEXT PRIMARY KEY")
-                    primary_key_set = True
-                elif 'id' in col.lower():
-                    # Pozostałe kolumny z ID będą zwykłymi kolumnami tekstowymi
-                    column_definitions.append(f"{clean_col} TEXT")
-                elif any(keyword in col.lower() for keyword in ['like', 'share', 'comment', 'view', 'reach', 'impression', 'follower']):
-                    column_definitions.append(f"{clean_col} INTEGER")
-                elif any(keyword in col.lower() for keyword in ['rate', 'score', 'percentage', 'ratio']):
-                    column_definitions.append(f"{clean_col} REAL")
-                elif any(keyword in col.lower() for keyword in ['age']):
-                    column_definitions.append(f"{clean_col} INTEGER")
-                else:
-                    column_definitions.append(f"{clean_col} TEXT")
-            
-            # Utworzenie tabeli
-            create_table_sql = f"""
-                CREATE TABLE social_media (
-                    {', '.join(column_definitions)}
-                )
-            """
-            
-            logger.info(f"🔨 Tworzenie tabeli SQL: {create_table_sql}")
-            cursor.execute(create_table_sql)
-            
-            self.sqlite_connection.commit()
-            setup_time = time.time() - start_time
-            logger.info(f"✅ Utworzono tabelę SQLite w czasie: {setup_time:.3f}s")
-            
-            # Zapisanie mapowania kolumn dla późniejszego użycia
-            self.column_mapping = {col: col.lower().replace(' ', '_').replace('-', '_').replace('(', '').replace(')', '') 
-                                 for col in columns}
+            logger.info(f"📊 Utworzono zoptymalizowaną tabelę HBase: {table_name}")
+            logger.info(f"📋 Rodziny kolumn: {list(families.keys())}")
             
             return True
             
         except Exception as e:
-            logger.error(f"❌ Błąd tworzenia tabeli SQLite: {e}")
+            logger.error(f"❌ Błąd tworzenia tabeli: {e}")
             return False
     
-    def load_data_to_hbase(self, csv_file_path):
+    def generate_optimized_row_key(self, row):
         """
-        Wczytanie danych do HBase z pomiarem wydajności
-        Bazuje na Twoim kodzie
+        Generowanie zoptymalizowanego klucza wiersza
+        Używa hash + timestamp dla lepszej dystrybucji
         """
-        logger.info("🚀 Rozpoczęcie wczytywania danych do HBase...")
-        start_time = time.time()
+        platform = row.get('Platform', 'unknown')
+        post_id = row.get('Post ID', '')
+        timestamp = row.get('Post Timestamp', '')
         
-        row_count = 0
-        batch_size = 1000
-        current_batch = 0
-        
+        # Parsowanie timestamp dla lepszego sortowania
         try:
-            with open(csv_file_path, newline='', encoding='utf-8') as csvfile:
-                reader = csv.DictReader(csvfile)
-                
-                # Analiza struktury danych
-                first_row = next(reader)
-                columns = list(first_row.keys())
-                logger.info(f"📋 Kolumny w CSV: {columns}")
-                
-                # Reset iteratora
-                csvfile.seek(0)
-                reader = csv.DictReader(csvfile)
-                
-                batch = self.hbase_table.batch(batch_size=batch_size)
-                
-                for row in reader:
-                    row_count += 1
-                    
-                    # Użycie Post ID jako klucz wiersza (jak w Twoim kodzie)
-                    row_key = row.get('Post ID', f'post_{row_count}')
-                    
-                    # Przygotowanie danych - wszystkie kolumny w rodzinie 'cf'
-                    data = {}
-                    for k, v in row.items():
-                        if k != 'Post ID':  # Pomijamy klucz
-                            column_name = f'cf:{k}'.encode()
-                            value = str(v).encode() if v else b''
-                            data[column_name] = value
-                    
-                    batch.put(row_key.encode(), data)
-                    
-                    # Wyślij batch co określoną liczbę rekordów
-                    if row_count % batch_size == 0:
-                        batch.send()
-                        current_batch += 1
-                        logger.info(f"📦 Wysłano batch {current_batch} ({row_count} rekordów)")
-                        batch = self.hbase_table.batch(batch_size=batch_size)
-                
-                # Wyślij pozostałe dane
-                if row_count % batch_size != 0:
-                    batch.send()
-                    logger.info(f"📦 Wysłano ostatni batch ({row_count % batch_size} rekordów)")
-        
-        except Exception as e:
-            logger.error(f"❌ Błąd wczytywania do HBase: {e}")
-            return False
-        
-        end_time = time.time()
-        write_time = end_time - start_time
-        
-        # Zapisanie metryki wydajności
-        self.performance_metrics['hbase']['write_times'].append(write_time)
-        self.data_stats['total_records'] = row_count
-        
-        logger.info(f"✅ Wczytano {row_count} rekordów do HBase w czasie: {write_time:.2f}s")
-        logger.info(f"📈 Wydajność: {row_count/write_time:.1f} rekordów/s")
-        
-        return True
-    
-    def load_data_to_sqlite(self, csv_file_path):
-        """Wczytanie danych do SQLite z automatycznym mapowaniem kolumn"""
-        logger.info("🚀 Rozpoczęcie wczytywania danych do SQLite...")
-        start_time = time.time()
-        
-        try:
-            # Wczytanie CSV z automatycznym dostosowaniem
-            df = pd.read_csv(csv_file_path)
-            
-            # Oczyszczenie nazw kolumn zgodnie z mapowaniem
-            df_clean = df.copy()
-            df_clean.columns = [col.lower().replace(' ', '_').replace('-', '_').replace('(', '').replace(')', '') 
-                               for col in df.columns]
-            
-            logger.info(f"📊 Oryginalne kolumny: {list(df.columns)}")
-            logger.info(f"📊 Oczyszczone kolumny: {list(df_clean.columns)}")
-            
-            # Sprawdzenie duplikatów w post_id
-            if 'post_id' in df_clean.columns:
-                duplicates = df_clean['post_id'].duplicated().sum()
-                if duplicates > 0:
-                    logger.warning(f"⚠️ Znaleziono {duplicates} duplikatów w post_id")
-                    logger.info("🔧 Usuwanie duplikatów i tworzenie unikalnych kluczy...")
-                    
-                    # Opcja 1: Usunięcie duplikatów (zachowanie pierwszego wystąpienia)
-                    # df_clean = df_clean.drop_duplicates(subset=['post_id'], keep='first')
-                    
-                    # Opcja 2: Dodanie unikalnego sufiksu do duplikatów
-                    df_clean['row_number'] = range(len(df_clean))
-                    df_clean['post_id'] = df_clean['post_id'].astype(str) + '_' + df_clean['row_number'].astype(str)
-                    df_clean = df_clean.drop('row_number', axis=1)
-                    
-                    logger.info(f"✅ Po usunięciu duplikatów: {len(df_clean)} rekordów")
-            
-            # Wstawienie danych - pandas automatycznie dopasuje kolumny
-            df_clean.to_sql('social_media', self.sqlite_connection, 
-                           if_exists='append', index=False)
-            
-            row_count = len(df_clean)
-            
-        except Exception as e:
-            logger.error(f"❌ Błąd wczytywania do SQLite: {e}")
-            logger.error(f"📋 Dostępne kolumny w DataFrame: {list(df.columns) if 'df' in locals() else 'N/A'}")
-            
-            # Próba z alternatywną strukturą tabeli (bez PRIMARY KEY)
-            logger.info("🔄 Próba utworzenia tabeli bez PRIMARY KEY...")
-            try:
-                # Usunięcie tabeli i utworzenie bez PRIMARY KEY
-                cursor = self.sqlite_connection.cursor()
-                cursor.execute("DROP TABLE IF EXISTS social_media")
-                
-                # Ponowne tworzenie z post_id jako zwykłą kolumną
-                columns, sample_row = self.analyze_csv_structure(csv_file_path)
-                column_definitions = []
-                
-                for col in columns:
-                    clean_col = col.lower().replace(' ', '_').replace('-', '_').replace('(', '').replace(')', '')
-                    
-                    if any(keyword in col.lower() for keyword in ['like', 'share', 'comment', 'view', 'reach', 'impression', 'follower']):
-                        column_definitions.append(f"{clean_col} INTEGER")
-                    elif any(keyword in col.lower() for keyword in ['rate', 'score', 'percentage', 'ratio']):
-                        column_definitions.append(f"{clean_col} REAL")
-                    elif any(keyword in col.lower() for keyword in ['age']):
-                        column_definitions.append(f"{clean_col} INTEGER")
-                    else:
-                        column_definitions.append(f"{clean_col} TEXT")
-                
-                # Dodanie automatycznego klucza głównego
-                create_table_sql = f"""
-                    CREATE TABLE social_media (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        {', '.join(column_definitions)}
-                    )
-                """
-                
-                cursor.execute(create_table_sql)
-                self.sqlite_connection.commit()
-                logger.info("✅ Utworzono tabelę z automatycznym kluczem głównym")
-                
-                # Ponowna próba wstawienia danych
-                df_clean.to_sql('social_media', self.sqlite_connection, 
-                               if_exists='append', index=False)
-                row_count = len(df_clean)
-                
-            except Exception as e2:
-                logger.error(f"❌ Błąd alternatywnej próby: {e2}")
-                return False
-        
-        end_time = time.time()
-        write_time = end_time - start_time
-        
-        # Zapisanie metryki wydajności
-        self.performance_metrics['sqlite']['write_times'].append(write_time)
-        
-        logger.info(f"✅ Wczytano {row_count} rekordów do SQLite w czasie: {write_time:.2f}s")
-        logger.info(f"📈 Wydajność: {row_count/write_time:.1f} rekordów/s")
-        
-        return True
-    
-    def benchmark_read_operations(self, sample_size=100):
-        """
-        Test wydajności operacji odczytu
-        Scenariusz 1: Odczyt losowych rekordów
-        """
-        logger.info("🔍 Test wydajności odczytu...")
-        
-        # Pobranie listy kluczy z HBase
-        keys = []
-        for key, _ in self.hbase_table.scan(limit=sample_size * 2):
-            keys.append(key.decode())
-        
-        if not keys:
-            logger.warning("⚠️ Brak danych w HBase do testowania")
-            return {'hbase': 0, 'sqlite': 0, 'sample_size': 0}
-        
-        # Losowy wybór kluczy do testowania
-        test_keys = np.random.choice(keys, min(sample_size, len(keys)), replace=False)
-        
-        # Test HBase
-        start_time = time.time()
-        for key in test_keys:
-            row = self.hbase_table.row(key.encode())
-        hbase_read_time = time.time() - start_time
-        
-        # Test SQLite - używamy pierwszej kolumny z ID lub unikalnego identyfikatora
-        start_time = time.time()
-        cursor = self.sqlite_connection.cursor()
-        
-        # Sprawdź strukturę tabeli SQLite
-        cursor.execute("PRAGMA table_info(social_media)")
-        columns_info = cursor.fetchall()
-        column_names = [col[1] for col in columns_info]
-        
-        if 'post_id' in column_names:
-            # Użyj post_id jeśli dostępne
-            for key in test_keys:
-                cursor.execute("SELECT * FROM social_media WHERE post_id LIKE ?", (f'{key}%',))
-                row = cursor.fetchone()
-        else:
-            # Alternatywnie użyj id (autoincrement) - losowe wybieranie
-            max_id_result = cursor.execute("SELECT MAX(id) FROM social_media").fetchone()
-            max_id = max_id_result[0] if max_id_result[0] else len(test_keys)
-            random_ids = np.random.randint(1, min(max_id + 1, len(test_keys) + 1), len(test_keys))
-            
-            for rand_id in random_ids:
-                cursor.execute("SELECT * FROM social_media WHERE id = ?", (int(rand_id),))
-                row = cursor.fetchone()
-                
-        sqlite_read_time = time.time() - start_time
-        
-        # Zapisanie metryk
-        self.performance_metrics['hbase']['read_times'].append(hbase_read_time)
-        self.performance_metrics['sqlite']['read_times'].append(sqlite_read_time)
-        
-        logger.info(f"📊 HBase odczyt {len(test_keys)} rekordów: {hbase_read_time:.3f}s")
-        logger.info(f"📊 SQLite odczyt {len(test_keys)} rekordów: {sqlite_read_time:.3f}s")
-        
-        return {
-            'hbase': hbase_read_time,
-            'sqlite': sqlite_read_time,
-            'sample_size': len(test_keys)
-        }
-    
-    def benchmark_query_operations(self):
-        """
-        Test wydajności zapytań filtrujących
-        Scenariusz 2: Zapytania według platformy
-        """
-        logger.info("🔎 Test wydajności zapytań...")
-        
-        platforms = ['Instagram', 'Facebook', 'Twitter', 'TikTok', 'LinkedIn']
-        
-        for platform in platforms:
-            # Test HBase - skanowanie z filtrowaniem
-            start_time = time.time()
-            hbase_results = []
-            for key, data in self.hbase_table.scan():
-                platform_value = data.get(b'cf:Platform', b'').decode()
-                if platform_value == platform:
-                    hbase_results.append(key)
-            hbase_query_time = time.time() - start_time
-            
-            # Test SQLite - zapytanie SQL
-            start_time = time.time()
-            cursor = self.sqlite_connection.cursor()
-            cursor.execute("SELECT * FROM social_media WHERE platform = ?", (platform,))
-            sqlite_results = cursor.fetchall()
-            sqlite_query_time = time.time() - start_time
-            
-            # Zapisanie metryk tylko jeśli znaleziono wyniki
-            if hbase_results or sqlite_results:
-                self.performance_metrics['hbase']['query_times'].append(hbase_query_time)
-                self.performance_metrics['sqlite']['query_times'].append(sqlite_query_time)
-                
-                logger.info(f"🔍 {platform} - HBase: {len(hbase_results)} wyników w {hbase_query_time:.3f}s")
-                logger.info(f"🔍 {platform} - SQLite: {len(sqlite_results)} wyników w {sqlite_query_time:.3f}s")
+            if timestamp:
+                # Zakładając format typu "2024-01-15 10:30:00"
+                dt = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+                ts_prefix = dt.strftime('%Y%m%d')
             else:
-                logger.info(f"ℹ️ {platform} - Brak danych dla tej platformy")
+                ts_prefix = '20240101'
+        except:
+            ts_prefix = '20240101'
+        
+        # Hash dla lepszej dystrybucji (unikanie hotspotów)
+        hash_suffix = hashlib.md5(f"{platform}_{post_id}".encode()).hexdigest()[:8]
+        
+        # Format: YYYYMMDD_PLATFORM_HASH
+        # To zapewnia chronologiczne sortowanie i równomierną dystrybucję
+        row_key = f"{ts_prefix}_{platform}_{hash_suffix}"
+        
+        return row_key
     
-    def benchmark_aggregation_operations(self):
+    def prepare_optimized_data(self, row):
         """
-        Test wydajności operacji agregacyjnych
-        Scenariusz 3: Statystyki według platform
+        Przygotowanie danych w zoptymalizowanej strukturze
+        Podział na logiczne rodziny kolumn
         """
-        logger.info("📈 Test wydajności agregacji...")
+        data = {}
         
-        # Test HBase - agregacja manualna
-        start_time = time.time()
-        platform_stats = {}
-        
-        for key, data in self.hbase_table.scan():
-            platform = data.get(b'cf:Platform', b'').decode()
-            likes = int(data.get(b'cf:Likes', b'0').decode() or 0)
-            
-            if platform not in platform_stats:
-                platform_stats[platform] = {'total_likes': 0, 'count': 0}
-            
-            platform_stats[platform]['total_likes'] += likes
-            platform_stats[platform]['count'] += 1
-        
-        hbase_agg_time = time.time() - start_time
-        
-        # Test SQLite - agregacja SQL
-        start_time = time.time()
-        cursor = self.sqlite_connection.cursor()
-        cursor.execute("""
-            SELECT platform, 
-                   SUM(likes) as total_likes,
-                   COUNT(*) as count,
-                   AVG(likes) as avg_likes
-            FROM social_media 
-            WHERE likes IS NOT NULL
-            GROUP BY platform
-        """)
-        sqlite_results = cursor.fetchall()
-        sqlite_agg_time = time.time() - start_time
-        
-        # Zapisanie metryk
-        self.performance_metrics['hbase']['aggregation_times'].append(hbase_agg_time)
-        self.performance_metrics['sqlite']['aggregation_times'].append(sqlite_agg_time)
-        
-        logger.info(f"📊 HBase agregacja: {hbase_agg_time:.3f}s")
-        logger.info(f"📊 SQLite agregacja: {sqlite_agg_time:.3f}s")
-        
-        return {
-            'hbase': {'time': hbase_agg_time, 'results': platform_stats},
-            'sqlite': {'time': sqlite_agg_time, 'results': sqlite_results}
-        }
-    
-    def generate_performance_report(self):
-        """Generowanie raportu wydajności"""
-        
-        def safe_mean(lst):
-            return np.mean(lst) if lst else 0
-        
-        report = {
-            'summary': {
-                'total_records': self.data_stats['total_records'],
-                'hbase_metrics': {
-                    'avg_write_time': safe_mean(self.performance_metrics['hbase']['write_times']),
-                    'avg_read_time': safe_mean(self.performance_metrics['hbase']['read_times']),
-                    'avg_query_time': safe_mean(self.performance_metrics['hbase']['query_times']),
-                    'avg_aggregation_time': safe_mean(self.performance_metrics['hbase']['aggregation_times'])
-                },
-                'sqlite_metrics': {
-                    'avg_write_time': safe_mean(self.performance_metrics['sqlite']['write_times']),
-                    'avg_read_time': safe_mean(self.performance_metrics['sqlite']['read_times']),
-                    'avg_query_time': safe_mean(self.performance_metrics['sqlite']['query_times']),
-                    'avg_aggregation_time': safe_mean(self.performance_metrics['sqlite']['aggregation_times'])
-                }
-            },
-            'detailed_metrics': self.performance_metrics
+        # Rodzina 'post' - podstawowe informacje
+        post_data = {
+            'post:id': str(row.get('Post ID', '')),
+            'post:type': str(row.get('Post Type', '')),
+            'post:content': str(row.get('Post Content', ''))[:1000],  # Ograniczenie długości
+            'post:timestamp': str(row.get('Post Timestamp', '')),
+            'post:platform': str(row.get('Platform', ''))
         }
         
-        return report
+        # Rodzina 'metrics' - metryki zaangażowania (konwersja na int gdzie możliwe)
+        metrics_data = {
+            'metrics:likes': str(self._safe_int(row.get('Likes', 0))),
+            'metrics:comments': str(self._safe_int(row.get('Comments', 0))),
+            'metrics:shares': str(self._safe_int(row.get('Shares', 0))),
+            'metrics:impressions': str(self._safe_int(row.get('Impressions', 0))),
+            'metrics:reach': str(self._safe_int(row.get('Reach', 0))),
+            'metrics:engagement_rate': str(self._safe_float(row.get('Engagement Rate', 0.0)))
+        }
+        
+        # Rodzina 'audience' - informacje o odbiorach
+        audience_data = {
+            'audience:age': str(row.get('Audience Age', '')),
+            'audience:gender': str(row.get('Audience Gender', '')),
+            'audience:location': str(row.get('Audience Location', '')),
+            'audience:interests': str(row.get('Audience Interests', ''))
+        }
+        
+        # Rodzina 'campaign' - kampanie i influencerzy
+        campaign_data = {
+            'campaign:id': str(row.get('Campaign ID', '')),
+            'campaign:sentiment': str(row.get('Sentiment', '')),
+            'campaign:influencer_id': str(row.get('Influencer ID', ''))
+        }
+        
+        # Łączenie wszystkich danych
+        for family_data in [post_data, metrics_data, audience_data, campaign_data]:
+            for key, value in family_data.items():
+                if value and value != 'nan':  # Filtrowanie pustych wartości
+                    data[key.encode()] = value.encode()
+        
+        return data
     
-    def visualize_results(self):
-        """Tworzenie wykresów porównawczych"""
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        
-        # Porównanie czasów zapisu
-        write_data = [
-            self.performance_metrics['hbase']['write_times'],
-            self.performance_metrics['sqlite']['write_times']
-        ]
-        if any(write_data):
-            axes[0, 0].bar(['HBase', 'SQLite'], 
-                          [np.mean(write_data[0]) if write_data[0] else 0,
-                           np.mean(write_data[1]) if write_data[1] else 0])
-            axes[0, 0].set_title('Średni czas zapisu danych')
-            axes[0, 0].set_ylabel('Czas (sekundy)')
-        
-        # Porównanie czasów odczytu
-        read_data = [
-            self.performance_metrics['hbase']['read_times'],
-            self.performance_metrics['sqlite']['read_times']
-        ]
-        if any(read_data):
-            axes[0, 1].bar(['HBase', 'SQLite'],
-                          [np.mean(read_data[0]) if read_data[0] else 0,
-                           np.mean(read_data[1]) if read_data[1] else 0])
-            axes[0, 1].set_title('Średni czas odczytu rekordów')
-            axes[0, 1].set_ylabel('Czas (sekundy)')
-        
-        # Porównanie czasów zapytań
-        query_data = [
-            self.performance_metrics['hbase']['query_times'],
-            self.performance_metrics['sqlite']['query_times']
-        ]
-        if any(query_data):
-            axes[1, 0].boxplot([q for q in query_data if q], 
-                              labels=['HBase', 'SQLite'])
-            axes[1, 0].set_title('Rozkład czasów zapytań')
-            axes[1, 0].set_ylabel('Czas (sekundy)')
-        
-        # Porównanie czasów agregacji
-        agg_data = [
-            self.performance_metrics['hbase']['aggregation_times'],
-            self.performance_metrics['sqlite']['aggregation_times']
-        ]
-        if any(agg_data):
-            axes[1, 1].bar(['HBase', 'SQLite'],
-                          [np.mean(agg_data[0]) if agg_data[0] else 0,
-                           np.mean(agg_data[1]) if agg_data[1] else 0])
-            axes[1, 1].set_title('Średni czas operacji agregacyjnych')
-            axes[1, 1].set_ylabel('Czas (sekundy)')
-        
-        plt.tight_layout()
-        plt.savefig('hbase_vs_sqlite_performance.png', dpi=300, bbox_inches='tight')
-        plt.show()
+    def _safe_int(self, value):
+        """Bezpieczna konwersja na int"""
+        try:
+            if value == '' or value is None or str(value).lower() == 'nan':
+                return 0
+            return int(float(value))
+        except:
+            return 0
     
-    def run_full_experiment(self, csv_file_path):
-        """Uruchomienie pełnego eksperymentu"""
-        logger.info("🎯 Rozpoczęcie pełnego eksperymentu wydajności...")
+    def _safe_float(self, value):
+        """Bezpieczna konwersja na float"""
+        try:
+            if value == '' or value is None or str(value).lower() == 'nan':
+                return 0.0
+            return float(value)
+        except:
+            return 0.0
+    
+    def load_batch_threaded(self, connection, table_name, batch_data):
+        """
+        Ładowanie pojedynczego batcha w osobnym wątku
+        """
+        start_time = time.time()
         
-        # Nawiązanie połączeń
-        if not self.connect_hbase() or not self.connect_sqlite():
+        try:
+            table = connection.table(table_name)
+            
+            # Użycie batch z większym buforem
+            with table.batch(batch_size=len(batch_data), transaction=False) as batch:
+                for row_key, data in batch_data:
+                    batch.put(row_key.encode(), data)
+            
+            batch_time = time.time() - start_time
+            logger.info(f"📦 Batch {len(batch_data)} rekordów załadowany w {batch_time:.3f}s")
+            
+            return {
+                'success': True,
+                'records': len(batch_data),
+                'time': batch_time
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Błąd ładowania batcha: {e}")
+            return {
+                'success': False,
+                'records': 0,
+                'time': 0
+            }
+    
+    def load_data_optimized(self, csv_file_path, table_name='social_media_optimized'):
+        """
+        Główna funkcja ładowania z optymalizacjami:
+        - Wielowątkowość
+        - Większe batche
+        - Zoptymalizowana struktura danych
+        - Monitoring wydajności
+        """
+        logger.info("🚀 Rozpoczęcie zoptymalizowanego ładowania do HBase...")
+        start_time = time.time()
+        
+        total_records = 0
+        current_batch = []
+        batch_futures = []
+        
+        try:
+            with open(csv_file_path, 'r', encoding='utf-8') as csvfile:
+                reader = csv.DictReader(csvfile)
+                
+                # Sprawdzenie nagłówków
+                logger.info(f"📋 Kolumny CSV: {reader.fieldnames}")
+                
+                # Przygotowanie ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=self.thread_pool_size) as executor:
+                    
+                    for row in reader:
+                        total_records += 1
+                        
+                        # Przygotowanie danych
+                        row_key = self.generate_optimized_row_key(row)
+                        optimized_data = self.prepare_optimized_data(row)
+                        
+                        current_batch.append((row_key, optimized_data))
+                        
+                        # Wysłanie batcha gdy osiągnie odpowiedni rozmiar
+                        if len(current_batch) >= self.batch_size:
+                            # Wybór połączenia z puli (round-robin)
+                            connection = self.connection_pool[len(batch_futures) % len(self.connection_pool)]
+                            
+                            # Wysłanie batcha w osobnym wątku
+                            future = executor.submit(
+                                self.load_batch_threaded,
+                                connection,
+                                table_name,
+                                current_batch.copy()
+                            )
+                            batch_futures.append(future)
+                            
+                            logger.info(f"📤 Wysłano batch {len(batch_futures)} ({len(current_batch)} rekordów)")
+                            current_batch = []
+                            
+                            # Monitoring postępu co 10 batchy
+                            if len(batch_futures) % 10 == 0:
+                                logger.info(f"📊 Postęp: {total_records} rekordów, {len(batch_futures)} batchy w toku")
+                    
+                    # Wysłanie ostatniego batcha
+                    if current_batch:
+                        connection = self.connection_pool[0]
+                        future = executor.submit(
+                            self.load_batch_threaded,
+                            connection,
+                            table_name,
+                            current_batch
+                        )
+                        batch_futures.append(future)
+                        logger.info(f"📤 Wysłano ostatni batch ({len(current_batch)} rekordów)")
+                    
+                    # Oczekiwanie na zakończenie wszystkich batchy
+                    logger.info("⏳ Oczekiwanie na zakończenie wszystkich batchy...")
+                    successful_batches = 0
+                    total_batch_time = 0
+                    
+                    for future in as_completed(batch_futures):
+                        result = future.result()
+                        if result['success']:
+                            successful_batches += 1
+                            total_batch_time += result['time']
+                            self.performance_metrics['batch_times'].append(result['time'])
+        
+        except Exception as e:
+            logger.error(f"❌ Błąd podczas ładowania: {e}")
             return False
         
-        # Konfiguracja tabel
-        if not self.setup_hbase_table() or not self.setup_sqlite_table(csv_file_path):
+        # Obliczenie metryk wydajności
+        total_time = time.time() - start_time
+        self.performance_metrics.update({
+            'load_time': total_time,
+            'total_records': total_records,
+            'records_per_second': total_records / total_time if total_time > 0 else 0,
+            'successful_batches': successful_batches,
+            'total_batches': len(batch_futures),
+            'avg_batch_time': total_batch_time / successful_batches if successful_batches > 0 else 0
+        })
+        
+        # Raport wydajności
+        logger.info("="*60)
+        logger.info("📊 RAPORT WYDAJNOŚCI ŁADOWANIA HBASE")
+        logger.info("="*60)
+        logger.info(f"✅ Załadowano rekordów: {total_records:,}")
+        logger.info(f"⏱️ Całkowity czas: {total_time:.2f}s")
+        logger.info(f"🚀 Wydajność: {self.performance_metrics['records_per_second']:,.1f} rekordów/s")
+        logger.info(f"📦 Batche: {successful_batches}/{len(batch_futures)} udanych")
+        logger.info(f"⚡ Średni czas batcha: {self.performance_metrics['avg_batch_time']:.3f}s")
+        logger.info(f"🔗 Czas połączeń: {self.performance_metrics['connection_time']:.2f}s")
+        logger.info("="*60)
+        
+        return True
+    
+    def verify_data_loading(self, table_name='social_media_optimized', sample_size=10):
+        """Weryfikacja poprawności załadowanych danych"""
+        logger.info("🔍 Weryfikacja załadowanych danych...")
+        
+        try:
+            table = self.connection_pool[0].table(table_name)
+            
+            # Pobranie próbki danych
+            sample_count = 0
+            for key, data in table.scan(limit=sample_size):
+                sample_count += 1
+                logger.info(f"📝 Rekord {sample_count}: {key.decode()}")
+                
+                # Pokazanie przykładowych danych z każdej rodziny kolumn
+                for family in ['post', 'metrics', 'audience', 'campaign']:
+                    family_data = {k.decode(): v.decode() for k, v in data.items() 
+                                 if k.decode().startswith(family)}
+                    if family_data:
+                        logger.info(f"   {family}: {dict(list(family_data.items())[:3])}")
+            
+            # Szybki count (przybliżony)
+            logger.info("📊 Liczenie rekordów w tabeli...")
+            count = 0
+            for _ in table.scan():
+                count += 1
+                if count % 10000 == 0:
+                    logger.info(f"   Policzono: {count:,} rekordów...")
+                if count > 100000:  # Limit dla szybkości
+                    logger.info(f"   Przerwano liczenie na {count:,} rekordach")
+                    break
+            
+            logger.info(f"✅ Weryfikacja zakończona. Próbka: {sample_count}, Policzono: {count:,}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Błąd weryfikacji: {e}")
             return False
-        
-        # Wczytanie danych
-        if not self.load_data_to_hbase(csv_file_path) or not self.load_data_to_sqlite(csv_file_path):
-            return False
-        
-        # Eksperymenty wydajnościowe
-        self.benchmark_read_operations()
-        self.benchmark_query_operations()
-        self.benchmark_aggregation_operations()
-        
-        # Generowanie raportu
-        report = self.generate_performance_report()
-        
-        logger.info("📋 RAPORT KOŃCOWY:")
-        print(json.dumps(report['summary'], indent=2))
-        
-        # Wizualizacja
-        self.visualize_results()
-        
-        # Zamknięcie połączeń
-        self.cleanup()
-        
-        return report
     
     def cleanup(self):
-        """Zamknięcie połączeń"""
-        if self.hbase_connection:
-            self.hbase_connection.close()
-        if self.sqlite_connection:
-            self.sqlite_connection.close()
+        """Zamknięcie wszystkich połączeń"""
+        for conn in self.connection_pool:
+            try:
+                conn.close()
+            except:
+                pass
         logger.info("🔒 Zamknięto wszystkie połączenia")
+    
+    def get_performance_report(self):
+        """Zwrócenie raportu wydajności"""
+        return self.performance_metrics
 
 def main():
-    """Główna funkcja eksperymentu"""
+    """Przykład użycia zoptymalizowanego loadera"""
     
-    # Ścieżka do pliku CSV (zmień na właściwą)
+    # Ścieżka do pliku CSV
     csv_file_path = 'social_media_engagement_data.csv'
+    table_name = 'social_media_optimized'
     
-    # Utworzenie analizatora i uruchomienie eksperymentu
-    analyzer = SocialMediaPerformanceAnalyzer()
+    # Utworzenie loadera
+    loader = OptimizedHBaseLoader()
     
     try:
-        report = analyzer.run_full_experiment(csv_file_path)
+        # Utworzenie puli połączeń
+        if not loader.create_connection_pool(pool_size=4):
+            return
         
-        if report:
-            logger.info("✅ Eksperyment zakończony pomyślnie!")
+        # Konfiguracja tabeli
+        if not loader.setup_optimized_table(table_name):
+            return
+        
+        # Ładowanie danych
+        if loader.load_data_optimized(csv_file_path, table_name):
+            # Weryfikacja
+            loader.verify_data_loading(table_name)
             
-            # Zapisanie raportu do pliku
-            with open('performance_report.json', 'w') as f:
+            # Zapisanie raportu wydajności
+            report = loader.get_performance_report()
+            with open('hbase_performance_report.json', 'w') as f:
                 json.dump(report, f, indent=2)
-            logger.info("💾 Raport zapisany do performance_report.json")
+            
+            logger.info("✅ Optymalizowane ładowanie zakończone pomyślnie!")
         else:
-            logger.error("❌ Eksperyment nie powiódł się")
+            logger.error("❌ Ładowanie nie powiodło się")
             
     except Exception as e:
         logger.error(f"❌ Błąd podczas eksperymentu: {e}")
     finally:
-        analyzer.cleanup()
+        loader.cleanup()
 
 if __name__ == "__main__":
     main()
