@@ -1,0 +1,14 @@
+org\example\CombinedAggregation\CombinedAggregationDriver.class
+org\example\CombinedAggregation\CombinedAggregationMapper.class
+org\example\CombinedAggregation\DoubleWritableArrayWritable.class
+org\example\FilteredRead\FilteredReadReducer.class
+org\example\AvgLikesDriver.class
+org\example\AvgLikesMapper.class
+org\example\AvgLikesReducer.class
+org\example\FilteredRead\FilteredReadDriver.class
+org\example\FilteredRead\FilteredReadMapper.class
+org\example\RangeAggregation\RangeAggregationMapper.class
+org\example\CombinedAggregation\CombinedAggregationReducer.class
+org\example\RangeAggregation\RangeAggregationDriver.class
+org\example\RangeAggregation\RangeAggregationReducer.class
+org\example\App.class
